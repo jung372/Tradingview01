@@ -1,0 +1,17 @@
+# Python-generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local credentials and environment settings
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Operating-system files
+Thumbs.db
+.DS_Store

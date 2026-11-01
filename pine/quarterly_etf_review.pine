@@ -1,0 +1,179 @@
+//@version=6
+// Policy v0.3: private, read-only review dashboard. No orders or performance claims.
+// Trend: SuperTrend (popular reference: KivancOzbilgic r6dAP7yi) via built-in ta.supertrend(), not copied code.
+// Fear: Williams Vix Fix (Larry Williams) with CM_Williams_Vix_Fix (ChrisMoody og7JPrRA) style thresholds,
+// independently expressed from the published formula. Selection rationale: reports/tradingview_algorithm_reselection_2026-10-27.md
+// Chandelier Exit moved to backtest comparison only (not displayed).
+indicator("4 ETF 분기 리밸런싱 검토 v0.3", overlay = true, max_bars_back = 500)
+
+string G_ACCOUNT = "1. 직접 확인한 보유 내역 (실제 값은 직접 입력)"
+float q1 = input.float(0, "SCHD 수량", minval = 0, group = G_ACCOUNT)
+float q2 = input.float(0, "QQQM 수량", minval = 0, group = G_ACCOUNT)
+float q3 = input.float(0, "IEF 수량", minval = 0, group = G_ACCOUNT)
+float q4 = input.float(0, "IAUM 수량 (AUM 아님)", minval = 0, group = G_ACCOUNT)
+float cash = input.float(0, "계정 USD 현금", minval = 0, group = G_ACCOUNT)
+float reserve = input.float(0, "위 현금 중 별도로 남겨둘 USD (해외2 확정 정책: 0)", minval = 0, group = G_ACCOUNT)
+int checkedAt = input.time(0, "수량·현금 최종 확인 시각", group = G_ACCOUNT)
+bool unchanged = input.bool(false, "위 시각 이후 거래·배당·입출금·분할 변동을 모두 반영했음", group = G_ACCOUNT)
+
+string G_POLICY = "2. 정책 후보 (최적값으로 검증되지 않음)"
+float target1 = input.float(25, "SCHD 목표 %", minval = 0, maxval = 100, group = G_POLICY)
+float target2 = input.float(25, "QQQM 목표 %", minval = 0, maxval = 100, group = G_POLICY)
+float target3 = input.float(30, "IEF 목표 %", minval = 0, maxval = 100, group = G_POLICY)
+float target4 = input.float(20, "IAUM 목표 %", minval = 0, maxval = 100, group = G_POLICY)
+float band = input.float(5, "허용 이탈폭 (%p)", minval = 0.1, maxval = 20, step = 0.5, group = G_POLICY)
+int reviewDays = input.int(5, "새 분기 첫 몇 거래일까지 점검할지", minval = 1, maxval = 10, group = G_POLICY)
+int completedQuarter = input.int(0, "점검 완료 분기 (예: 20264 = 2026년 4분기)", minval = 0, group = G_POLICY)
+bool manualReview = input.bool(false, "분기 창을 놓친 경우 수동 점검 (끝나면 해제)", group = G_POLICY)
+bool quarterlyAlerts = input.bool(false, "분기/수동 점검 알림 허용 (별도 알림 생성 필요)", group = G_POLICY)
+
+string G_TREND = "3. 확정 주봉 추세 (실험적 참고, 조기 주문 신호 아님)"
+int stLength = input.int(10, "SuperTrend ATR 기간 (주)", minval = 2, maxval = 100, group = G_TREND)
+float stMultiplier = input.float(3, "SuperTrend ATR 배수", minval = 0.1, maxval = 10, group = G_TREND)
+
+string G_FEAR = "4. 확정 주봉 공포 구간 (Williams Vix Fix, 실험적 참고)"
+int vfLength = input.int(22, "Vix Fix 최고 종가 기간", minval = 2, maxval = 100, group = G_FEAR)
+int vfBandLength = input.int(20, "Vix Fix 볼린저 기간", minval = 2, maxval = 100, group = G_FEAR)
+float vfBandMult = input.float(2, "Vix Fix 볼린저 표준편차 배수", minval = 0.1, maxval = 5, group = G_FEAR)
+int vfRangeLength = input.int(50, "Vix Fix 최근 최고치 기간", minval = 2, maxval = 200, group = G_FEAR)
+float vfRangePct = input.float(0.85, "Vix Fix 최근 최고치 비율", minval = 0.5, maxval = 1, step = 0.01, group = G_FEAR)
+
+string TZ = "America/New_York"
+int DAY_MS = 86400000
+float EPS = 0.0000001
+// Fixed real USD ETFs; regular-session, split-adjusted, NOT dividend-adjusted valuation.
+string s1 = ticker.new("AMEX", "SCHD", session.regular, adjustment.splits)
+string s2 = ticker.new("NASDAQ", "QQQM", session.regular, adjustment.splits)
+string s3 = ticker.new("NASDAQ", "IEF", session.regular, adjustment.splits)
+string s4 = ticker.new("AMEX", "IAUM", session.regular, adjustment.splits)
+
+f_quarter(int ts) =>
+    year(ts, TZ) * 10 + int(math.floor((month(ts, TZ) - 1) / 3)) + 1
+
+f_daily() =>
+    int count = ta.barssince(timeframe.change("3M"))
+    int endOfQuarter = ta.valuewhen(timeframe.change("3M"), time[1], 0)
+    // EVERY returned value is offset. No current daily close is used.
+    [close[1], time[1], time_close[1], count[1], endOfQuarter[1]]
+
+f_weekly() =>
+    [stLine, stDirection] = ta.supertrend(stMultiplier, stLength)
+    // Built-in SuperTrend uses NEGATIVE direction for an uptrend.
+    int st = na(stLine) ? na : stDirection < 0 ? 1 : -1
+    bool flipped = not na(st) and not na(st[1]) and st != st[1]
+    int lastFlip = ta.valuewhen(flipped, time_close, 0)
+    // Williams Vix Fix: % drop from the highest close to this bar's low.
+    float highestClose = ta.highest(close, vfLength)
+    float wvf = 100 * (highestClose - low) / highestClose
+    float upperBand = ta.sma(wvf, vfBandLength) + vfBandMult * ta.stdev(wvf, vfBandLength)
+    float rangeHigh = vfRangePct * ta.highest(wvf, vfRangeLength)
+    bool vfReady = not na(upperBand) and not na(rangeHigh)
+    int fear = vfReady ? (wvf >= upperBand or wvf >= rangeHigh ? 1 : 0) : na
+    // EVERY returned value is offset. No unfinished weekly bar is used.
+    [st[1], flipped[1], lastFlip[1], fear[1], wvf[1], time_close[1]]
+
+[p1, d1, end1, previousQuarterDay, previousQuarterEnd] = request.security(s1, "1D", f_daily(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+[p2, d2, end2, unusedDay2, unusedEnd2] = request.security(s2, "1D", f_daily(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+[p3, d3, end3, unusedDay3, unusedEnd3] = request.security(s3, "1D", f_daily(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+[p4, d4, end4, unusedDay4, unusedEnd4] = request.security(s4, "1D", f_daily(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+[st1, flip1, flipAt1, fear1, wvf1, week1] = request.security(s1, "1W", f_weekly(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+[st2, flip2, flipAt2, fear2, wvf2, week2] = request.security(s2, "1W", f_weekly(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+[st3, flip3, flipAt3, fear3, wvf3, week3] = request.security(s3, "1W", f_weekly(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+[st4, flip4, flipAt4, fear4, wvf4, week4] = request.security(s4, "1W", f_weekly(), gaps = barmerge.gaps_off, lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+
+bool chartOK = chart.is_standard and timeframe.isminutes and timeframe.multiplier == 60 and syminfo.prefix == "AMEX" and syminfo.ticker == "SCHD" and syminfo.session == session.regular
+int nowTs = barstate.islast ? timenow : time_close
+int currentQuarter = f_quarter(time)
+bool firstQuarterDay = not na(d1) and currentQuarter != f_quarter(d1)
+int quarterDay = firstQuarterDay ? 1 : previousQuarterDay + 2
+int quarterEnd = firstQuarterDay ? d1 : previousQuarterEnd
+bool windowOpen = not na(quarterDay) and quarterDay <= reviewDays
+bool reviewDue = (windowOpen and completedQuarter != currentQuarter) or manualReview
+bool pricesOK = not na(p1) and not na(p2) and not na(p3) and not na(p4) and math.min(p1, p2, p3, p4) > 0
+bool datesOK = not na(d1) and d1 == d2 and d1 == d3 and d1 == d4 and end1 == end2 and end1 == end3 and end1 == end4
+bool priceFresh = datesOK and end1 <= nowTs and nowTs - end1 <= 7 * DAY_MS
+bool weightsOK = math.abs(target1 + target2 + target3 + target4 - 100) <= EPS
+bool cashOK = reserve <= cash
+bool holdingsOK = unchanged and checkedAt > 0 and checkedAt <= nowTs and nowTs - checkedAt <= 7 * DAY_MS and (not reviewDue or checkedAt >= end1)
+float investCash = cash - reserve
+float total = q1 * p1 + q2 * p2 + q3 * p3 + q4 * p4 + investCash
+bool dataOK = chartOK and pricesOK and datesOK and priceFresh and weightsOK and cashOK and holdingsOK and not na(total) and total > 0
+bool cashPolicyOK = reserve == 0
+string cashPolicyText = cashPolicyOK ? "현금 정책: 전액 포함" : "주의: 별도 현금 입력 — 확정 정책(전액 포함)과 다름"
+bool trendsOK = not na(st1) and not na(st2) and not na(st3) and not na(st4) and not na(fear1) and not na(fear2) and not na(fear3) and not na(fear4) and week1 == week2 and week1 == week3 and week1 == week4 and week1 <= nowTs and nowTs - week1 <= 14 * DAY_MS
+
+float w1 = dataOK ? 100 * q1 * p1 / total : na
+float w2 = dataOK ? 100 * q2 * p2 / total : na
+float w3 = dataOK ? 100 * q3 * p3 / total : na
+float w4 = dataOK ? 100 * q4 * p4 / total : na
+float drift = dataOK ? math.max(math.abs(w1 - target1), math.abs(w2 - target2), math.abs(w3 - target3), math.abs(w4 - target4)) : na
+bool bandHit = dataOK and drift + EPS >= band
+bool initial = dataOK and q1 + q2 + q3 + q4 == 0
+bool earlyCandidate = dataOK and trendsOK and not reviewDue and bandHit and (flip1 or flip2 or flip3 or flip4)
+
+string errorText = not chartOK ? "AMEX:SCHD / 60분 / 일반 캔들 / 정규장으로 설정" : not cashOK ? "별도 보유 현금이 총 현금보다 큼" : not weightsOK ? "목표비중 합계는 100%여야 함" : not pricesOK ? "ETF 가격 누락·0·음수" : not datesOK ? "네 ETF의 가격 기준시각 불일치" : not priceFresh ? "가격이 7일 초과 또는 미래시각" : not holdingsOK ? "수량·현금 확인 체크/시각 갱신 (분기에는 평가 종가 이후)" : "투자대상 평가액이 0 이하"
+string state = not dataOK ? "DATA_CHECK" : initial ? "INITIAL_ALLOCATION" : reviewDue and bandHit ? "REBALANCE_REVIEW" : reviewDue ? "QUARTERLY_REVIEW" : earlyCandidate ? "EARLY_REVIEW_CANDIDATE" : bandHit ? "DRIFT_WATCH" : "ON_TRACK"
+string reason = not dataOK ? errorText : initial ? "초기 배분 검토: 기존 투자분 리밸런싱과 구분" : reviewDue and bandHit ? "허용폭 도달: 목표비중 복원 여부 검토" : reviewDue ? "분기 점검: 허용폭 이내, 의무 매매 없음" : earlyCandidate ? "실험적 참고: 비중 이탈 + 확정 주봉 전환 (조기 알림 없음)" : bandHit ? "비중 이탈 관찰: 분기/수동 점검 때 판단" : "허용폭 이내: 다음 분기 점검"
+
+f_num(float x) =>
+    na(x) ? "—" : str.tostring(x, "#.00")
+f_date(int ts) =>
+    na(ts) or ts == 0 ? "미확인" : str.format_time(ts, "yyyy-MM-dd", TZ)
+f_stamp(int ts) =>
+    na(ts) or ts == 0 ? "미확인" : str.format_time(ts, "yyyy-MM-dd HH:mm", TZ) + " NY"
+f_direction(int d) =>
+    na(d) ? "미확인" : d == 1 ? "상승" : "하락"
+f_fear(int f, float w) =>
+    na(f) ? "미확인" : (f == 1 ? "공포 구간 " : "평상 ") + f_num(w)
+f_row(table panel, int row, string name, float price, float weight, float target, int st, int changedAt, int fear, float wvf) =>
+    float difference = weight - target
+    float gap = dataOK ? (target - weight) * total / 100 : na
+    bool actionable = dataOK and reviewDue and (bandHit or initial)
+    string action = not dataOK ? "입력 확인" : not actionable ? "관찰" : math.abs(difference) < 0.01 ? "유지" : difference > 0 ? "초과분 축소 검토" : "부족분 보충 검토"
+    // Vix Fix only refines the UNDERWEIGHT + DOWNTREND case. It never changes targets or sell-side reading.
+    string timing = not trendsOK ? "추세 미확인" : not actionable ? "추세 " + f_direction(st) + " 참고" : difference > 0 ? (st == -1 ? "하락: 축소 검토 우선" : "상승: 초과분만 검토") : st == 1 ? "상승: 보충 검토 우호" : fear == 1 ? "하락+공포: 1차 분할 보충 검토" : "하락: 분할·재확인"
+    color rowColor = not dataOK ? color.new(color.gray, 85) : math.abs(difference) + EPS >= band ? color.new(color.orange, 78) : color.new(color.teal, 88)
+    table.cell(panel, 0, row, name, bgcolor = rowColor, text_color = color.white)
+    table.cell(panel, 1, row, f_num(price), text_color = color.white)
+    table.cell(panel, 2, row, f_num(weight) + "%", text_color = color.white)
+    table.cell(panel, 3, row, f_num(target) + "%", text_color = color.white)
+    table.cell(panel, 4, row, f_num(difference) + "p", text_color = color.white)
+    table.cell(panel, 5, row, f_num(gap), text_color = color.white)
+    table.cell(panel, 6, row, f_direction(st) + " / " + f_date(changedAt), text_color = color.white)
+    table.cell(panel, 7, row, f_fear(fear, wvf), text_color = color.white)
+    table.cell(panel, 8, row, action + "\n" + timing, text_color = color.white)
+
+var table panel = table.new(position.top_right, 9, 12, bgcolor = color.new(color.black, 8), border_width = 1)
+if barstate.isfirst
+    table.merge_cells(panel, 0, 0, 8, 0)
+    for r = 6 to 11
+        table.merge_cells(panel, 0, r, 8, r)
+if barstate.islast
+    table.cell(panel, 0, 0, "4 ETF 분기 검토 v0.3 | " + state, text_color = color.white, bgcolor = dataOK ? color.new(color.teal, 30) : color.new(color.red, 30))
+    array<string> headers = array.from("ETF", "종가 USD", "현재비중", "목표비중", "차이 %p", "복원 차액 USD*", "주봉 SuperTrend / 전환일", "주봉 Vix Fix", "해석")
+    for c = 0 to 8
+        table.cell(panel, c, 1, array.get(headers, c), text_color = color.silver)
+    f_row(panel, 2, "SCHD", p1, w1, target1, st1, flipAt1, fear1, wvf1)
+    f_row(panel, 3, "QQQM", p2, w2, target2, st2, flipAt2, fear2, wvf2)
+    f_row(panel, 4, "IEF", p3, w3, target3, st3, flipAt3, fear3, wvf3)
+    f_row(panel, 5, "IAUM", p4, w4, target4, st4, flipAt4, fear4, wvf4)
+    table.cell(panel, 0, 6, reason, text_color = color.yellow)
+    table.cell(panel, 0, 7, "가격: " + f_date(d1) + " 미국 종가 | 주봉 마감: " + f_date(week1) + " | 보유 확인: " + f_stamp(checkedAt), text_color = color.white)
+    table.cell(panel, 0, 8, "투자대상 USD " + f_num(dataOK ? total : na) + " | 포함 현금 " + f_num(investCash) + " | 별도 현금 " + f_num(reserve) + " | 최대 이탈 " + f_num(drift) + "%p | " + cashPolicyText, text_color = cashPolicyOK ? color.white : color.orange)
+    table.cell(panel, 0, 9, "분기 코드 " + str.tostring(currentQuarter) + " / " + str.tostring(quarterDay) + "번째 거래일 | 직전 분기말 " + f_date(quarterEnd) + " | 다음 점검: 다음 1·4·7·10월 첫 미국 거래일", text_color = color.white)
+    table.cell(panel, 0, 10, "* +는 부족 / -는 초과. 비용·세금 전 단순 차액이며 주문금액·수량 아님. 추세·공포 구간은 실험적 참고(바닥 예측 아님).", text_color = color.silver)
+    table.cell(panel, 0, 11, "전일 종가·직전 확정 주봉 사용. 현 수량의 과거 소급 백테스트 아님. 설정 변경 후 알림 재생성.", text_color = color.silver)
+
+f_alertRow(string name, float weight, float target) =>
+    name + " 현재 " + f_num(weight) + "% / 목표 " + f_num(target) + "% / 이탈 " + f_num(weight - target) + "%p; "
+var int notifiedQuarter = na
+var int dataReminderQuarter = na
+// Alerts only on a confirmed host candle; no earlyCandidate alert is implemented.
+if barstate.isrealtime and barstate.isconfirmed and quarterlyAlerts and reviewDue
+    if not dataOK and (na(dataReminderQuarter) or dataReminderQuarter != currentQuarter)
+        alert("v0.3 DATA_CHECK | " + errorText + " | 판단 보류, 주문 아님", alert.freq_once_per_bar_close)
+        dataReminderQuarter := currentQuarter
+    else if dataOK and (na(notifiedQuarter) or notifiedQuarter != currentQuarter)
+        string detail = f_alertRow("SCHD", w1, target1) + f_alertRow("QQQM", w2, target2) + f_alertRow("IEF", w3, target3) + f_alertRow("IAUM", w4, target4)
+        alert("v0.3 " + state + " | " + reason + " | " + cashPolicyText + " | 허용폭 " + f_num(band) + "%p | " + detail + " 가격 " + f_stamp(end1) + " / 보유확인 " + f_stamp(checkedAt) + " / 판단 " + f_stamp(time_close) + " / 분기 " + str.tostring(currentQuarter) + " | DATA_OK | 주문 아님", alert.freq_once_per_bar_close)
+        notifiedQuarter := currentQuarter
