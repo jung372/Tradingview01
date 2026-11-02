@@ -1,0 +1,156 @@
+//@version=6
+// Account snapshot contract ETF1; source of truth: Stock_Trading_Log ledger.
+// Private indicator. No broker orders. Recreate alerts whenever the snapshot changes.
+indicator("해외2 ETF 분기 Balance v1", overlay = true, max_bars_back = 500)
+
+string snapshot = input.string("", "잔고 스냅샷", tooltip = "해외2 Balance에서 생성한 ETF1 자료 전체를 입력합니다. 알림은 반드시 새로 생성하세요.")
+bool enabled = input.bool(false, "운영 알림 활성화")
+bool probe = input.bool(false, "시험 신호 1회 (매매 아님)", tooltip = "연결 검증용입니다. 운영 알림과 분리하여 사용하세요.")
+string TZ = "America/New_York"
+string ALGO = "etf-quarterly-v1"
+array<string> parts = str.split(snapshot, "|")
+bool shapeOK = array.size(parts) == 24
+f_text(int i) =>
+    shapeOK ? array.get(parts, i) : ""
+f_num(int i) =>
+    str.tonumber(f_text(i))
+f_quarter(int ts) =>
+    year(ts, TZ) * 10 + int(math.floor((month(ts, TZ) - 1) / 3)) + 1
+// A daily expression uses ONLY the completed previous session at the quarter boundary.
+// No current daily close or future bar is used, despite lookahead_on.
+f_quarter_close() =>
+    bool newQuarter = timeframe.change("3M")
+    [ta.valuewhen(newQuarter, close[1], 0), ta.valuewhen(newQuarter, time_close[1], 0)]
+f_previous_close() =>
+    [close[1], time_close[1]]
+string s1 = ticker.new("AMEX", "SCHD", session.regular, adjustment.none)
+string s2 = ticker.new("NASDAQ", "QQQM", session.regular, adjustment.none)
+string s3 = ticker.new("NASDAQ", "IEF", session.regular, adjustment.none)
+string s4 = ticker.new("AMEX", "IAUM", session.regular, adjustment.none)
+[p1, d1] = request.security(s1, "1D", f_quarter_close(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+[p2, d2] = request.security(s2, "1D", f_quarter_close(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+[p3, d3] = request.security(s3, "1D", f_quarter_close(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+[p4, d4] = request.security(s4, "1D", f_quarter_close(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+[testPrice, testDate] = request.security(s1, "1D", f_previous_close(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+array<float> prices = array.from(p1, p2, p3, p4)
+array<string> names = array.from("SCHD", "QQQM", "IEF", "IAUM")
+array<float> quantities = array.new_float(4, 0)
+array<float> targets = array.new_float(4, 0)
+array<float> units = array.new_float(4, 1)
+array<float> orders = array.new_float(4, 0)
+float cash = f_num(8)
+float reserve = f_num(9)
+float band = f_num(10)
+float costRate = f_num(11)
+int qid = int(f_num(4))
+int asOf = int(f_num(5))
+int expires = int(f_num(6))
+int completed = int(f_num(7))
+bool dataOK = shapeOK and f_text(0) == "ETF1" and str.length(f_text(1)) == 32 and str.length(f_text(2)) == 32
+dataOK := dataOK and not na(cash) and cash >= 0 and not na(reserve) and reserve >= 0 and reserve <= cash
+dataOK := dataOK and not na(band) and band > 0 and band <= 20 and not na(costRate) and costRate >= 0 and costRate <= 0.05
+dataOK := dataOK and not na(qid) and qid % 10 >= 1 and qid % 10 <= 4 and not na(asOf) and not na(expires)
+dataOK := dataOK and asOf <= timenow and expires >= timenow and not na(f_num(3)) and f_num(3) >= 1 and not na(completed)
+float sumTargets = 0.0
+for i = 0 to 3
+    float q = f_num(12 + i)
+    float w = f_num(16 + i)
+    float u = f_num(20 + i)
+    array.set(quantities, i, q)
+    array.set(targets, i, w)
+    array.set(units, i, u)
+    sumTargets += w
+    dataOK := dataOK and not na(q) and q >= 0 and not na(w) and w > 0 and w <= 1 and not na(u) and u > 0
+dataOK := dataOK and math.abs(sumTargets - 1) <= 0.00000001
+bool chartOK = syminfo.ticker == "SCHD" and (syminfo.prefix == "AMEX" or syminfo.prefix == "BATS") and timeframe.isminutes and timeframe.multiplier == 60 and chart.is_standard
+bool pricesOK = not na(d1) and d1 == d2 and d1 == d3 and d1 == d4
+for i = 0 to 3
+    float p = array.get(prices, i)
+    pricesOK := pricesOK and not na(p) and p > 0
+bool due = dataOK and pricesOK and chartOK and f_quarter(d1) == qid and f_quarter(time) > qid and completed < qid and session.ismarket
+float assets = cash - reserve
+for i = 0 to 3
+    assets += array.get(quantities, i) * array.get(prices, i)
+bool bandHit = false
+if dataOK and pricesOK and assets > 0
+    for i = 0 to 3
+        float weight = array.get(quantities, i) * array.get(prices, i) / assets
+        bandHit := bandHit or math.abs(weight - array.get(targets, i)) * 100 + 0.00000001 >= band
+float budget = assets
+if dataOK and pricesOK and assets > 0 and bandHit
+    for iteration = 0 to 31
+        float turnover = 0.0
+        for i = 0 to 3
+            turnover += math.abs(budget * array.get(targets, i) - array.get(quantities, i) * array.get(prices, i))
+        float nextBudget = math.max(0, assets - turnover * costRate)
+        bool converged = math.abs(nextBudget - budget) < 0.00000001
+        budget := nextBudget
+        if converged
+            break
+    for i = 0 to 3
+        float delta = budget * array.get(targets, i) / array.get(prices, i) - array.get(quantities, i)
+        float order = math.floor(math.abs(delta) / array.get(units, i)) * array.get(units, i) * math.sign(delta)
+        array.set(orders, i, order)
+float buys = 0.0
+float sells = 0.0
+for i = 0 to 3
+    float amount = array.get(orders, i) * array.get(prices, i)
+    buys += math.max(0, amount)
+    sells += math.max(0, -amount)
+float available = cash - reserve + sells * (1 - costRate)
+// Reduce largest buys first, using the same lot rule as the Decimal reference.
+array<bool> processed = array.new_bool(4, false)
+for pass = 0 to 3
+    int chosen = -1
+    float biggest = 0.0
+    for i = 0 to 3
+        float amount = array.get(orders, i) * array.get(prices, i)
+        if not array.get(processed, i) and amount > biggest
+            biggest := amount
+            chosen := i
+    if chosen >= 0
+        array.set(processed, chosen, true)
+        float deficit = buys * (1 + costRate) - available
+        if deficit > 0
+            float lotCost = array.get(units, chosen) * array.get(prices, chosen) * (1 + costRate)
+            float reduction = math.min(array.get(orders, chosen), math.ceil(deficit / lotCost) * array.get(units, chosen))
+            array.set(orders, chosen, array.get(orders, chosen) - reduction)
+            buys -= reduction * array.get(prices, chosen)
+float remaining = cash + sells - buys - (buys + sells) * costRate
+bool hasOrders = false
+for i = 0 to 3
+    hasOrders := hasOrders or array.get(orders, i) != 0
+bool actionable = due and assets > 0 and bandHit and hasOrders and remaining + 0.000001 >= reserve
+string state = not chartOK ? "SCHD 60분 일반 차트 필요" : not dataOK ? "잔고 자료 확인 필요" : not pricesOK ? "시세 확인 필요" : completed >= qid ? "분기 처리 완료" : not due ? "다음 분기 점검 대기" : actionable ? "매매 검토 필요" : "매매 불필요"
+var table panel = table.new(position.top_right, 4, 7, border_width=1, bgcolor=color.rgb(20, 30, 45))
+if barstate.islast
+    table.cell(panel, 0, 0, "해외2 후보 A", text_color=color.white)
+    table.cell(panel, 1, 0, state, text_color=color.white)
+    table.cell(panel, 2, 0, "잔고 버전", text_color=color.white)
+    table.cell(panel, 3, 0, f_text(2), text_color=color.white)
+    for i = 0 to 3
+        table.cell(panel, 0, i+1, array.get(names, i), text_color=color.white)
+        table.cell(panel, 1, i+1, str.tostring(array.get(quantities, i), "#.########"), text_color=color.white)
+        table.cell(panel, 2, i+1, str.tostring(array.get(targets, i)*100, "#.##") + "%", text_color=color.white)
+        table.cell(panel, 3, i+1, actionable ? str.tostring(array.get(orders, i), "#.########") : "—", text_color=color.white)
+    table.cell(panel, 0, 5, "USD 현금", text_color=color.white)
+    table.cell(panel, 1, 5, str.tostring(cash, "#.##"), text_color=color.white)
+    table.cell(panel, 2, 5, "분기말 가격일", text_color=color.white)
+    table.cell(panel, 3, 5, not na(d1) ? str.format_time(d1, "yyyy-MM-dd", TZ) : "—", text_color=color.white)
+    table.cell(panel, 0, 6, probe ? "시험 모드" : enabled ? "운영 알림 허용" : "운영 알림 꺼짐", text_color=color.white)
+
+f_message(string kind, int stamp, array<float> ps) =>
+    string json = '{"schema_version":1,"algorithm_version":"' + ALGO + '","kind":"' + kind + '","binding_id":"' + f_text(1) + '","snapshot_id":"' + f_text(2) + '","policy_version":' + f_text(3) + ',"quarter_id":' + f_text(4)
+    json += ',"generated_at":"' + str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC") + '","price_date":"' + str.format_time(stamp, "yyyy-MM-dd", TZ) + '","prices":['
+    for i = 0 to 3
+        json += (i > 0 ? "," : "") + str.tostring(array.get(ps, i), "#.##########")
+    json + "]}"
+varip bool sent = false
+if barstate.isrealtime and barstate.isconfirmed and not sent
+    if probe and dataOK and not na(testPrice) and testPrice > 0
+        alert(f_message("PROBE", testDate, array.from(testPrice, testPrice, testPrice, testPrice)), alert.freq_once_per_bar_close)
+        sent := true
+    else if enabled and not probe and actionable
+        alert(f_message("TRADE", d1, prices), alert.freq_once_per_bar_close)
+        sent := true
+// Ordinary quarterly checks and DATA_CHECK do not generate user trade notifications.

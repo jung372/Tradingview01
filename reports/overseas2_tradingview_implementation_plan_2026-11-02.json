@@ -1,0 +1,430 @@
+{
+  "plan_version": 1,
+  "date": "2026-11-02",
+  "status": "LOCAL_IMPLEMENTATION_PARTIAL_G0_BLOCKED_PLAN",
+  "purpose": "경민 해외2 Balance의 실제 원장과 TradingView Pine을 연결하는 분기 ETF 리밸런싱 구현 및 개발 모델 배정",
+  "execution_notice": "작업 배정 명세이며 실행기나 Codex 전역 설정이 아니다. 아직 구현, 모델 전환, 계정 연결, 배포를 수행하지 않았다.",
+  "scope": {
+    "instance_id": "user-001",
+    "portfolio_name": "해외2",
+    "portfolio_id": null,
+    "portfolio_id_resolution": "운영 인스턴스의 읽기 전용 조회로 확인 후 바인딩. 이름만으로 대상 선정 금지.",
+    "repositories": [
+      "Stock_Trading_Log",
+      "TradingView_01"
+    ],
+    "runtime_uses_llm_for_trade_decisions": false,
+    "manual_ledger_entry": true,
+    "automatic_broker_orders": false
+  },
+  "policy": {
+    "weights": {
+      "SCHD": 0.1,
+      "QQQM": 0.45,
+      "IEF": 0.25,
+      "IAUM": 0.2
+    },
+    "currency": "USD",
+    "band_percentage_points": 5,
+    "trigger": "분기말 기준 절대 비중 차이가 하나라도 5%p 이상이면 네 ETF 전체 목표비중 복원 검토",
+    "cadence": "QUARTERLY",
+    "no_trade_push": false,
+    "price_basis": "분기말 동일 거래일의 정규장 확정 종가. 배당은 실제 세후 현금으로 반영하며 배당 조정 가격과 중복 계산 금지.",
+    "holdings_basis": "분기 판단에는 해당 분기말 기준 원장을 사용. 실행 수량은 최신 잔고와 시세로 재검증.",
+    "signal_timing": "미래 정보 없이 직전 분기말 자료가 확정된 다음 분기 첫 정규장 봉 마감 시점에 평가하는 안을 우선 검증.",
+    "daily_trigger": "이번 범위에서 제외. 별도 전략 및 성과 검증 필요."
+  },
+  "model_policy": {
+    "default": {
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "medium"
+    },
+    "complex_implementation": {
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "high"
+    },
+    "critical_design_review": {
+      "model": "gpt-6-astra",
+      "reasoning_effort": "high"
+    },
+    "browser_verification": {
+      "model": "gpt-6.1-terra",
+      "reasoning_effort": "high"
+    },
+    "bounded_documentation": {
+      "model": "gpt-6-luna",
+      "reasoning_effort": "medium"
+    },
+    "escalation": "구체적인 계산 불일치, 동기화 경쟁 상태, 보안 경계 결함이 해결되지 않을 때만 해당 항목을 Astra high로 이관. 전 작업을 일괄 승격하지 않는다.",
+    "delegation": "이 계획만으로 병렬 에이전트 실행을 시작하지 않는다."
+  },
+  "gates": [
+    {
+      "id": "G0",
+      "name": "Pine 잔고와 실행 중인 알림 자동 갱신 실증",
+      "status": "UNVERIFIED",
+      "reason": "공식 MCP의 Pine 지표 기반 알림 및 Webhook 알림 생성/수정 미지원. 브라우저 기반 갱신 경로를 실제 계정에서 검증해야 한다.",
+      "pass_conditions": [
+        "시험 잔고 v1 입력과 실제 Add to chart 성공",
+        "전용 시험 알림 활성 확인",
+        "v2 갱신 시 v1 알림 중지 확인",
+        "v2 알림의 시험 신호에 정확한 버전 포함",
+        "로그인 만료 및 재시작 시 성공으로 오표시하지 않음"
+      ],
+      "failure_policy": "완전 자동화로 출시하지 않는다. 반자동 대안은 별도 선택으로 표시하며 요구사항을 충족한 것으로 간주하지 않는다."
+    },
+    {
+      "id": "G1",
+      "name": "운영 배포",
+      "pass_conditions": [
+        "G0 통과",
+        "수량·현금·분기 기준 검산",
+        "실제 Webhook 수신 및 사용자 알림 검증",
+        "기존 다른 계정 회귀 검증",
+        "배포 전후 원장 보존 확인"
+      ]
+    }
+  ],
+  "contracts": {
+    "snapshot": [
+      "schema_version",
+      "binding_id",
+      "snapshot_id",
+      "ledger_revision",
+      "policy_version",
+      "algorithm_version",
+      "as_of",
+      "quarter_id",
+      "quantities",
+      "usd_cash",
+      "target_weights",
+      "band_pp",
+      "completed_quarter",
+      "valid_until"
+    ],
+    "signal": [
+      "schema_version",
+      "binding_id",
+      "snapshot_id",
+      "policy_version",
+      "algorithm_version",
+      "quarter_id",
+      "signal_id",
+      "price_dates",
+      "close_prices",
+      "weights",
+      "draft_quantities",
+      "reason",
+      "generated_at"
+    ],
+    "sync_states": [
+      "DIRTY",
+      "QUEUED",
+      "STOPPING_OLD",
+      "APPLYING",
+      "VERIFYING",
+      "SYNCED",
+      "FAILED",
+      "AUTH_REQUIRED"
+    ],
+    "signal_states": [
+      "RECEIVED",
+      "REJECTED_STALE",
+      "REJECTED_INVALID",
+      "READY",
+      "IN_PROGRESS",
+      "COMPLETED",
+      "DISMISSED"
+    ],
+    "rules": [
+      "Pine 입력 문자열에는 비밀정보를 포함하지 않는다.",
+      "binding_id는 서버 설정으로 계정에 매핑하며 payload의 임의 계정 ID를 신뢰하지 않는다.",
+      "실제 활성 알림 버전 확인 전에는 SYNCED로 표시하지 않는다.",
+      "수신 신호는 인증·계정·분기·버전·유효기간·가격일·중복을 검증한다.",
+      "이미 도착한 휴대폰 푸시는 회수할 수 없다. 구버전 알림 중지 실패 또는 전송 중 경쟁 상태를 기록한다.",
+      "원장 커밋과 동기화 작업 등록은 함께 저장하되 브라우저·네트워크 호출은 DB 잠금 밖에서 수행한다."
+    ]
+  },
+  "tasks": [
+    {
+      "id": "T00",
+      "title": "전략·동기화 계약과 실패 처리 설계",
+      "depends_on": [],
+      "model": "gpt-6-astra",
+      "reasoning_effort": "high",
+      "deliverables": [
+        "분기 판단 기준과 실행 수량 기준 분리",
+        "원장·Pine·알림 버전 계약",
+        "잔고 변경과 구알림 경쟁 상태 검토",
+        "G0 시험 설계"
+      ],
+      "acceptance": "지원되지 않는 공식 API를 가정하지 않고, 실패·재인증·구버전 신호의 처리 경로를 명세한다."
+    },
+    {
+      "id": "T01",
+      "title": "브라우저 동기화 시험 및 실행 가능성 판정",
+      "depends_on": [
+        "T00"
+      ],
+      "model": "gpt-6.1-terra",
+      "reasoning_effort": "high",
+      "deliverables": [
+        "G0 시험 증거",
+        "화면에서 확인한 잔고 v1/v2와 활성 알림",
+        "무인 실행 가능 여부 및 필요한 로그인 조건"
+      ],
+      "acceptance": "실제 Pine 컴파일과 새 알림 버전으로 시험 신호 발생을 확인한다. 알림 생성 클릭만으로 완료하지 않는다."
+    },
+    {
+      "id": "T02",
+      "title": "계정 바인딩 및 DB 구조",
+      "depends_on": [
+        "T00"
+      ],
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "medium",
+      "paths": [
+        "Stock_Trading_Log/backend/app/sql/schema.sql",
+        "Stock_Trading_Log/backend/app/api_models.py",
+        "Stock_Trading_Log/backend/app/config.py"
+      ],
+      "deliverables": [
+        "기존 asset_allocation_plan/target 재사용",
+        "etf_tv_binding",
+        "etf_tv_snapshot",
+        "etf_tv_sync_job",
+        "etf_tv_signal",
+        "반복 실행 가능한 스키마 확장"
+      ],
+      "acceptance": "경민 해외2만 활성화하며 다른 인스턴스·계정 데이터가 섞이지 않는다. 기존 원장은 보존한다."
+    },
+    {
+      "id": "T03",
+      "title": "원장 스냅샷과 참조 계산기",
+      "depends_on": [
+        "T02"
+      ],
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "high",
+      "review_model": "gpt-6-astra",
+      "review_reasoning_effort": "high",
+      "paths": [
+        "Stock_Trading_Log/backend/app/services/etf_snapshot.py (new)",
+        "Stock_Trading_Log/backend/app/services/etf_rebalance.py (new)",
+        "Stock_Trading_Log/backend/app/repository.py"
+      ],
+      "deliverables": [
+        "Total과 동일 원천의 수량·현금 조회",
+        "분기말 기준 원장 재구성",
+        "Decimal 기반 비중·매매안 참조 계산",
+        "버전 및 payload 생성"
+      ],
+      "acceptance": "배당·수수료·정정·소수 보유·미확정 가격·분할을 대조하며 총수익 가격과 현금배당 중복을 방지한다. 알 수 없는 자료는 0으로 대체하지 않는다."
+    },
+    {
+      "id": "T04",
+      "title": "후보 A 전용 Pine",
+      "depends_on": [
+        "T00",
+        "T03"
+      ],
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "high",
+      "review_model": "gpt-6-astra",
+      "review_reasoning_effort": "high",
+      "paths": [
+        "TradingView_01/pine/quarterly_etf_account.pine (new)",
+        "TradingView_01/tests/test_account_policy.py (new)"
+      ],
+      "deliverables": [
+        "버전 있는 잔고 입력 파서",
+        "네 ETF 분기말 정규장 종가 정렬",
+        "허용폭 이탈 및 전체 목표 복원",
+        "매매 필요 시에만 JSON alert",
+        "완료 분기 중복 방지",
+        "시험 모드와 운영 모드 명확히 구분"
+      ],
+      "acceptance": "참조 계산과 일치하며 repainting/lookahead 없이 동작. 정상 유지 상태에서는 사용자 푸시가 없고 실제 Add to chart를 통과한다."
+    },
+    {
+      "id": "T05",
+      "title": "원장 변경 추적과 동기화 작업자",
+      "depends_on": [
+        "T01",
+        "T02",
+        "T03",
+        "T04"
+      ],
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "high",
+      "review_model": "gpt-6-astra",
+      "review_reasoning_effort": "high",
+      "paths": [
+        "Stock_Trading_Log/backend/app/services/transactions.py",
+        "Stock_Trading_Log/backend/app/services/excel_import.py",
+        "Stock_Trading_Log/backend/app/services/tradingview_sync.py (new)",
+        "Stock_Trading_Log/ops/tradingview_bridge/ (new, G0-dependent)"
+      ],
+      "deliverables": [
+        "매매·배당·입출금·환전·정정·취소·일괄수입 변경 감지",
+        "연속 수정 시 최신 버전으로 작업 합침",
+        "구알림 중지→입력 반영→새 알림 생성→확인",
+        "영속 상태·재시도·AUTH_REQUIRED"
+      ],
+      "acceptance": "구버전 작업이 최신 버전을 덮어쓰지 않으며, 재시작·로그인 만료·적용 도중 원장 변경에서 잘못된 SYNCED 상태가 발생하지 않는다."
+    },
+    {
+      "id": "T06",
+      "title": "Webhook 수신과 신호 검증",
+      "depends_on": [
+        "T02",
+        "T03",
+        "T04"
+      ],
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "high",
+      "review_model": "gpt-6-astra",
+      "review_reasoning_effort": "high",
+      "paths": [
+        "Stock_Trading_Log/backend/app/services/tradingview_webhook.py (new)",
+        "Stock_Trading_Log/backend/app/main.py",
+        "Stock_Trading_Log/backend/app/api_models.py"
+      ],
+      "deliverables": [
+        "전용 HTTPS 수신 경로",
+        "인증·형식·크기 제한",
+        "신호 저장 후 빠른 응답",
+        "버전·분기·중복 검증",
+        "현재 잔고 기준 실행안 재검증"
+      ],
+      "acceptance": "잘못된 계정·구버전·중복 신호가 매매안으로 채택되지 않는다. 일반 원장 API를 외부에 공개하지 않는다."
+    },
+    {
+      "id": "T07",
+      "title": "해외2 전용 Balance UI와 API",
+      "depends_on": [
+        "T02",
+        "T03",
+        "T06"
+      ],
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "medium",
+      "paths": [
+        "Stock_Trading_Log/frontend/src/main.tsx",
+        "Stock_Trading_Log/frontend/src/EtfBalance.tsx (new)",
+        "Stock_Trading_Log/frontend/src/EtfBalance.css (new)",
+        "Stock_Trading_Log/backend/app/main.py"
+      ],
+      "deliverables": [
+        "해외2만 화면 분기",
+        "목표·현재 비중과 USD 현금",
+        "원장 및 적용 버전·기준시각",
+        "신호 이력·매매안·진행 상태",
+        "재동기화·분기 완료 처리",
+        "예정 API /api/etf-balance/{portfolio_id}/overview, policy, sync, signals"
+      ],
+      "acceptance": "Total과 수량·현금이 일치하고, 동기화 대기를 완료로 표시하지 않는다. 기존 RIM Balance는 그대로 동작한다."
+    },
+    {
+      "id": "T08",
+      "title": "자동 회귀 및 금융 계산 테스트",
+      "depends_on": [
+        "T03",
+        "T04",
+        "T05",
+        "T06",
+        "T07"
+      ],
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "high",
+      "paths": [
+        "Stock_Trading_Log/backend/tests/test_etf_*.py (new)",
+        "Stock_Trading_Log/frontend/src/EtfBalance.test.tsx (new)",
+        "TradingView_01/tests/test_account_policy.py (new)"
+      ],
+      "deliverables": [
+        "0건 알림/1건 알림",
+        "경계값 5%p",
+        "10주 제안 후 9주 실제 거래",
+        "배당과 환전",
+        "분기말 이후 거래 및 소급 정정",
+        "미동기화·중복·재시작",
+        "계정 간 격리"
+      ],
+      "acceptance": "독립된 계산 예제와 원장 불변성 검증이 통과하며 금융 로직을 그대로 복제한 테스트만으로 끝내지 않는다."
+    },
+    {
+      "id": "T09",
+      "title": "실제 화면·알림·운영 검증",
+      "depends_on": [
+        "T08"
+      ],
+      "model": "gpt-6.1-terra",
+      "reasoning_effort": "high",
+      "deliverables": [
+        "Pine Add to chart",
+        "실제 활성 알림 버전 확인",
+        "Webhook→Balance 표시",
+        "TradingView 푸시 수신",
+        "개발 및 운영 적용 경계 확인"
+      ],
+      "acceptance": "코드 테스트, 알림 생성, Webhook 수신, 앱 푸시 수신을 각각 증거로 남긴다. 운영 전 원장 백업과 배포 후 보존·다른 계정 회귀를 확인한다."
+    },
+    {
+      "id": "T10",
+      "title": "사용 안내와 최종 검토",
+      "depends_on": [
+        "T09"
+      ],
+      "model": "gpt-6-luna",
+      "reasoning_effort": "medium",
+      "review_model": "gpt-6-astra",
+      "review_reasoning_effort": "high",
+      "deliverables": [
+        "수기 거래 후 상태 확인 안내",
+        "재인증·동기화 실패 복구 안내",
+        "G1 최종 판정"
+      ],
+      "acceptance": "Astra는 금융·동기화·계정 경계 중심으로 최종 검토하고, 문구 정리는 Luna가 수행한다."
+    }
+  ],
+  "sources": [
+    "https://developers.openai.com/api/docs/models",
+    "https://developers.openai.com/api/docs/guides/model-selection",
+    "https://www.tradingview.com/pine-script-docs/concepts/alerts/",
+    "https://www.tradingview.com/mcp/docs"
+  ],
+  "implementation_record": {
+    "date": "2026-11-02",
+    "user_decision": "Complete available code first; account upgrade later",
+    "implemented": [
+      "ledger snapshots and dirty tracking",
+      "ETF Balance UI",
+      "Decimal reference calculation",
+      "Pine account indicator",
+      "webhook relay and validation",
+      "execution preview",
+      "adapter-independent sync coordinator"
+    ],
+    "remaining": [
+      "G0 technical alert creation and v1/v2 replacement",
+      "actual unattended BrowserAdapter implementation and worker attachment",
+      "production deployment and HTTPS relay setup",
+      "real webhook and app-push receipt"
+    ],
+    "verified": {
+      "backend_regression": 349,
+      "etf_targeted": 20,
+      "frontend": 83,
+      "build": "PASS",
+      "pine_chart_compile": "PASS",
+      "local_demo_ui": "PASS"
+    },
+    "gates": {
+      "technical_alerts": "Basic limit 0, creation rejected",
+      "saved_script": "Basic limit 1, new script save rejected"
+    },
+    "model_assignments": "Planned allocation only; no delegated model agents executed",
+    "report": "overseas2_implementation_2026-11-02.md"
+  }
+}
